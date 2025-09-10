@@ -8,7 +8,7 @@ import yt_dlp
 
 
 ###
-###video mode / host the bot on a pi
+###video mode
 ###
 
 
@@ -25,6 +25,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 voice_client = {}
 queue = {}
 titleQueue = []
+inactivity_timers = {}
 nowPlaying = ""
 
 yt_dlp_options = {
@@ -41,6 +42,28 @@ ffmpeg_options = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_s
 async def on_ready():
     logging.info(f'Logged in as {bot.user.name}')
     print(f"We are logged in as {bot.user.name}")
+
+
+### Inactivity Disconnect ###
+async def disconnect_after_inactivity(channel_id, timeout=600):
+    task = asyncio.create_task(asyncio.sleep(timeout))
+    inactivity_timers[channel_id] = task
+    await task
+    if channel_id in voice_client and voice_client[channel_id].is_connected():
+        await voice_client[channel_id].disconnect()
+        del voice_client[channel_id]
+        if channel_id in queue:
+            del queue[channel_id]
+        print(f"Disconnected from channel {channel_id} due to inactivity.")
+        del titleQueue[:]
+        inactivity_timers.pop(channel_id, None)
+
+
+def reset_inactivity_timer(channel_id, timeout=600):
+    if channel_id in inactivity_timers:
+        inactivity_timers[channel_id].cancel()
+        inactivity_timers.pop(channel_id, None)
+        asyncio.create_task(disconnect_after_inactivity(channel_id, timeout))
 
 ### Helper Functions for !play ###
 
@@ -81,6 +104,7 @@ async def play_song(ctx, channel, search):
                 print(f"Error playing next song: {e}")
         else:
             print("Queue is empty or next song is None after skip.")
+            asyncio.run_coroutine_threadsafe(disconnect_after_inactivity(channel.id), bot.loop)
 
     try:
         voice_client[channel.id].play(
@@ -113,6 +137,9 @@ async def play(ctx, *, search: str = None):
     if channel.id not in queue:
         queue[channel.id] = []
 
+    if channel.id in inactivity_timers:
+        inactivity_timers[channel.id].cancel()
+        inactivity_timers.pop(channel.id, None)
 
     ### RESUME ####
     if search is None:
@@ -145,6 +172,8 @@ async def pause(ctx):
     if channel.id not in voice_client or not voice_client[channel.id].is_connected():
         await ctx.send("I'm not connected to your voice channel.")
         return
+    
+    reset_inactivity_timer(channel.id)
 
     voice_client[channel.id].pause()
     await ctx.send("Audio paused. To resume use !play")
@@ -158,6 +187,7 @@ async def showqueue(ctx):
         return
 
     channel = ctx.author.voice.channel
+    reset_inactivity_timer(channel.id)
     if channel.id not in queue or not queue[channel.id]:
         await ctx.send("The queue is empty.")
         return
@@ -175,11 +205,15 @@ async def stop(ctx):
     channel = ctx.author.voice.channel
     if channel.id in voice_client and voice_client[channel.id].is_connected():
         voice_client[channel.id].stop()
-
+    if channel.id in inactivity_timers:
+        inactivity_timers[channel.id].cancel()
+        inactivity_timers.pop(channel.id, None)
     if channel.id in queue:
         queue[channel.id].clear()
 
+
     await ctx.send("Audio stopped and queue cleared.")
+    asyncio.create_task(disconnect_after_inactivity(channel.id))
 
 ###SKIP###
 @bot.command()
@@ -189,6 +223,7 @@ async def skip(ctx):
         return
 
     channel = ctx.author.voice.channel
+    reset_inactivity_timer(channel.id)
     if channel.id not in queue or not queue[channel.id]:
         await ctx.send("The queue is empty.")
         return
